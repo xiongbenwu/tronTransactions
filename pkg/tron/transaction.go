@@ -1,6 +1,9 @@
 package tron
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Transaction struct {
 	ID        string  `json:"txID"`
@@ -9,7 +12,24 @@ type Transaction struct {
 }
 
 type RawData struct {
-	Contract []Contract `json:"contract"`
+	Contract Contract `json:"contract"`
+}
+
+// Custom UnmarshalJSON for unmarshaling fisrt element of JSON array as RawData.Contract struct.
+func (t *RawData) UnmarshalJSON(b []byte) error {
+	tmp := struct {
+		Contract []Contract `json:"contract"`
+	}{}
+
+	if err := json.Unmarshal(b, &tmp); err != nil {
+		return err
+	}
+
+	if len(tmp.Contract) != 0 {
+		t.Contract = tmp.Contract[0]
+	}
+
+	return nil
 }
 
 type TransactionResponse struct {
@@ -41,16 +61,16 @@ type Value struct {
 
 func (t *Transaction) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
-		ID         string `json:"id"`
-		Time       int64  `json:"time"`
-		InAddress  string `json:"in_address"`
-		OutAddress string `json:"out_address"`
-		Amount     int64  `json:"amount"`
+		ID         string    `json:"id"`
+		Time       time.Time `json:"time"`
+		InAddress  string    `json:"in_address"`
+		OutAddress string    `json:"out_address"`
+		Amount     int64     `json:"amount"`
 	}{
 		ID:         t.ID,
-		Time:       t.Timestamp,
-		InAddress:  t.RawData.Contract[0].Parameter.Value.ToAddress,
-		OutAddress: t.RawData.Contract[0].Parameter.Value.OwnerAddress,
-		Amount:     t.RawData.Contract[0].Parameter.Value.Amount,
+		Time:       time.UnixMilli(t.Timestamp),
+		InAddress:  t.RawData.Contract.Parameter.Value.ToAddress,
+		OutAddress: t.RawData.Contract.Parameter.Value.OwnerAddress,
+		Amount:     t.RawData.Contract.Parameter.Value.Amount,
 	})
 }

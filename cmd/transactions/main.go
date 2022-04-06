@@ -33,15 +33,24 @@ func main() {
 }
 
 func Run(ctx *cli.Context) error {
-	tr, err := client.NewClient(ctx.String("address"), ctx.String("url"))
+	address := ctx.String("address")
+	url := ctx.String("url")
+
+	client, err := client.NewClient(address, url)
 	if err != nil {
 		return err
 	}
-	err = tr.Run()
-	if err != nil {
-		return err
-	}
-	server := server.Server{Client: tr}
-	server.ListenAndServe()
-	return nil
+
+	server := server.Server{Client: client}
+	errCh := make(chan error)
+
+	go func() {
+		errCh <- client.Run()
+	}()
+
+	go func() {
+		errCh <- server.ListenAndServe()
+	}()
+
+	return <-errCh
 }

@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 	"transactions/pkg/tron"
 )
+
+const updateRate = 5
 
 type TRONClient struct {
 	client       *http.Client
@@ -19,8 +22,21 @@ type TRONClient struct {
 	lastUpdate   int64
 }
 
-func (c *TRONClient) GetTransactions() ([]tron.Transaction, error) {
-	return c.transactions, nil
+func (c *TRONClient) GetTransactions(address string) ([]tron.Transaction, error) {
+	c.mu.RLock()
+	transactions := c.transactions
+	c.mu.RUnlock()
+
+	var matched []tron.Transaction
+
+	for _, t := range transactions {
+		if t.RawData.Contract.Parameter.Value.OwnerAddress == address ||
+			t.RawData.Contract.Parameter.Value.ToAddress == address {
+			matched = append(matched, t)
+		}
+	}
+
+	return matched, nil
 }
 
 func NewClient(address string, apiURL string) (*TRONClient, error) {
@@ -39,76 +55,50 @@ func NewClient(address string, apiURL string) (*TRONClient, error) {
 	return c, nil
 }
 
+// Run receives all transactions at start and updates array every 5 seconds.
 func (c *TRONClient) Run() error {
-	err := c.getInitialTransactions()
-	if err != nil {
-		return err
-	}
-	go func() {
-		c.scan()
-	}()
+	c.mu.Lock()
 
-	return nil
-}
-
-func (c *TRONClient) scan() error {
-
-	return nil
-}
-
-func (c *TRONClient) getInitialTransactions() error {
-	req, err := c.newGetTransactionRequest("")
+	transactions, err := c.getTransactionsRecursive("")
 	if err != nil {
 		return err
 	}
 
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
+	c.transactions = transactions
+	c.mu.Unlock()
 
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return err
-	}
-	var trResponse tron.TransactionResponse
+	ticker := time.NewTicker(updateRate * time.Second)
 
-	err = json.Unmarshal(body, &trResponse)
-	if err != nil {
-		return err
-	}
+	for {
+		<-ticker.C
 
-	if trResponse.Meta.Fingerprint != "" {
-		err := c.getTransactionsRecursive(trResponse.Meta.Fingerprint, trResponse.Data)
+		transactions, err := c.getTransactionsRecursive("")
 		if err != nil {
+			ticker.Stop()
+
 			return err
 		}
-	}
 
-	for _, t := range trResponse.Data {
-		if t.RawData.Contract[0].Type == "TransferContract" {
-			c.transactions = append(c.transactions, t)
-		}
+		c.mu.Lock()
+		c.transactions = append(c.transactions, transactions...)
+		c.mu.Unlock()
 	}
-
-	return nil
 }
 
-func (c *TRONClient) getTransactionsRecursive(fingerprint string, transactions []tron.Transaction) error {
-	req, err := c.newGetTransactionRequest(fingerprint)
+func (c *TRONClient) getTransactionsRecursive(fingerprint string) ([]tron.Transaction, error) {
+	req, err := c.newGetTransactionRequest(fingerprint, fmt.Sprintf("%d", c.lastUpdate))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	res, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 
@@ -116,22 +106,44 @@ func (c *TRONClient) getTransactionsRecursive(fingerprint string, transactions [
 
 	err = json.Unmarshal(body, &trResponse)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	transactions = append(transactions, trResponse.Data...)
+	var transferTransactions []tron.Transaction
+
+	for _, t := range trResponse.Data {
+		if t.RawData.Contract.Type == "TransferContract" {
+			transferTransactions = append(transferTransactions, t)
+		}
+	}
+
 	if trResponse.Meta.Fingerprint != "" {
-		return c.getTransactionsRecursive(trResponse.Meta.Fingerprint, transactions)
+		t, err := c.getTransactionsRecursive(trResponse.Meta.Fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		transferTransactions = append(transferTransactions, t...)
+	} else {
+		c.lastUpdate = trResponse.Meta.At
 	}
 
-	return nil
+	return transferTransactions, nil
 }
 
-func (c *TRONClient) newGetTransactionRequest(fingerprint string) (*http.Request, error) {
+func (c *TRONClient) newGetTransactionRequest(fingerprint, minTimestamp string) (*http.Request, error) {
+	order := "block_timestamp,asc"
 	u := *c.apiURL
+	q := u.Query()
+	q.Set("limit", "200")
+
 	if fingerprint != "" {
-		u.RawQuery = fmt.Sprintf("fingerprint=%s", fingerprint)
+		q.Add("fingerprint", fingerprint)
 	}
+
+	q.Add("order_by", order)
+	q.Add("min_timestamp", minTimestamp)
+
+	u.RawQuery = q.Encode()
 	u.Path = fmt.Sprintf("%saccounts/%s/transactions", u.Path, c.mainAddress)
 
 	req, err := http.NewRequest("GET", u.String(), nil)
@@ -140,5 +152,6 @@ func (c *TRONClient) newGetTransactionRequest(fingerprint string) (*http.Request
 	}
 
 	req.Header.Add("Accept", "application/json")
+
 	return req, nil
 }
